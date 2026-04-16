@@ -1,0 +1,29 @@
+[Unit]
+Description=Prediction Market Trading Bot — Cross-platform Arbitrage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmc
+Group=pmc
+WorkingDirectory=/opt/pmc
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/pmc/.env
+ExecStart=/opt/pmc/venv/bin/python /opt/pmc/cli.py arb --paper --interval 30 --min-spread 0.005 --notional 100
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StandardOutput=append:/var/log/pmc/arb-bot.log
+StandardError=append:/var/log/pmc/arb-bot.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pmc /var/log/pmc
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

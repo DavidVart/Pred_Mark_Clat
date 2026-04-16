@@ -1,0 +1,21 @@
+{
+  "_comment": "Manually-curated Polymarket ↔ Kalshi pairs. Each pair MUST resolve identically on the same underlying truth. WRONG PAIRS = GUARANTEED LOSSES. Verify resolution criteria match word-for-word before adding. Update market_ids when contracts roll (weekly/monthly).",
+  "_schema": {
+    "pair_id": "stable unique key",
+    "description": "human-readable",
+    "polymarket_market_id": "Polymarket condition_id or question id from gamma-api",
+    "kalshi_ticker": "Kalshi market ticker, e.g. FED-26JUN-T50",
+    "category": "sports|crypto|politics|fed|economics",
+    "mechanical_resolution": "true if both resolve on explicit oracle/official source (not UMA judgment)",
+    "notes": "anything unusual about the pair"
+  },
+  "_instructions_for_adding_new_pairs": [
+    "1. Find an event on Kalshi with a clear resolution source (e.g. 'BTC close on Coinbase on Apr 30').",
+    "2. Search Polymarket gamma-api for the same event + same date + same resolution source.",
+    "3. Verify BOTH resolution rulebooks word-for-word. If Polymarket resolves on UMA and Kalshi resolves on CFTC, DO NOT PAIR.",
+    "4. Prefer: Fed rate decisions, crypto close prices with explicit oracle, election state calls with AP as source.",
+    "5. Avoid: 'by end of year' geopolitical, 'agreement reached' anything, sports game over-unders (tick-size differs).",
+    "6. Set mechanical_resolution=false if ANY ambiguity exists. The scanner will skip these."
+  ],
+  "pairs": []
+}

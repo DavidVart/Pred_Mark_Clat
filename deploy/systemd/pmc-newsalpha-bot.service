@@ -1,0 +1,29 @@
+[Unit]
+Description=Prediction Market Trading Bot — NewsAlpha (high-velocity, log-only in v1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmc
+Group=pmc
+WorkingDirectory=/opt/pmc
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/pmc/.env
+ExecStart=/opt/pmc/venv/bin/python /opt/pmc/cli.py news-scan --trade --poll 3 --min-edge 0.03 --db /opt/pmc/newsalpha.db --bankroll 1000
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StandardOutput=append:/var/log/pmc/newsalpha-bot.log
+StandardError=append:/var/log/pmc/newsalpha-bot.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pmc /var/log/pmc
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
