@@ -26,8 +26,10 @@ from src.utils.logging import get_logger
 
 logger = get_logger("newsalpha.news_classifier")
 
-# Fast, cheap model for headline triage
-DEFAULT_MODEL = "anthropic/claude-haiku-4"
+# Fast, cheap model for headline triage.
+# OpenRouter model IDs must match exactly — see https://openrouter.ai/models
+# Verified live on OpenRouter: 200 OK as of April 2026.
+DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 
 SYSTEM_PROMPT = """You are a crypto trading signal classifier. Given a news headline, classify its likely impact on Bitcoin's price in the next 1-4 hours.
 

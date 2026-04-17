@@ -91,10 +91,11 @@ class OpenPosition:
 
     @property
     def pnl(self) -> float:
-        if self.side == "yes":
-            return (self.current_price - self.entry_price) * self.size
-        else:
-            return (self.entry_price - self.current_price) * self.size
+        # On prediction markets, YES and NO shares are BOTH assets that pay
+        # $1 at resolution. For either side, PnL per share = exit - entry.
+        # current_price is the market price of the SAME side we bought, so
+        # a single formula works for both.
+        return (self.current_price - self.entry_price) * self.size
 
     @property
     def pnl_pct(self) -> float:

@@ -157,10 +157,9 @@ class TradeExecutor:
             # Calculate unrealized PnL
             entry = pos_data["entry_price"]
             quantity = pos_data["quantity"]
-            if pos_data["side"] == "yes":
-                pnl = (current_price - entry) * quantity
-            else:
-                pnl = (entry - current_price) * quantity
+            # Same PnL formula for YES and NO — both are assets paying $1 at
+            # resolution, and current_price tracks the side we hold.
+            pnl = (current_price - entry) * quantity
 
             cost_basis = pos_data["cost_basis"]
             pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
@@ -204,12 +203,16 @@ class TradeExecutor:
 
             # Check if market is settled / closed
             if market.status in ("closed", "settled", "finalized"):
-                # Market resolved — determine outcome
+                # Market resolved — determine outcome.
+                # final_price is the YES-side resolution value.
                 final_price = 1.0 if market.yes_price > 0.95 else (0.0 if market.yes_price < 0.05 else current_price)
                 if pos_data["side"] == "yes":
+                    # YES share pays final_price at resolution
                     pnl = (final_price - entry) * quantity
                 else:
-                    pnl = (entry - (1.0 - final_price)) * quantity
+                    # NO share pays (1 - final_price) at resolution
+                    no_payout = 1.0 - final_price
+                    pnl = (no_payout - entry) * quantity
                 pnl_pct = pnl / cost_basis if cost_basis > 0 else 0
 
                 outcome = "win" if pnl > 0 else "loss"

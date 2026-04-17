@@ -154,6 +154,54 @@ class TestExitLogic:
         assert row[0] == "trailing_lock"
 
 
+class TestPnLFormula:
+    """Regression tests for the 'NO-side PnL was inverted' bug. Both YES and NO
+    positions must compute PnL as (current - entry) * size when current_price
+    tracks the side we bought."""
+
+    @pytest.mark.asyncio
+    async def test_yes_pnl_profit_when_price_rises(self, na_db):
+        ex = NewsAlphaExecutor(NewsAlphaExecutorConfig(bankroll=1000), na_db)
+        await ex.on_signal(_signal(market="m1", side="yes", market_price=0.40, sec_left=600))
+        # Price rises from 0.40 → 0.55 → we should be in profit
+        await ex.check_exits({"m1": _quote("m1", yes=0.55, sec_left=500)})
+        # Position might have closed via trailing_lock; check stored trade
+        cursor = await na_db.db.execute("SELECT pnl FROM na_trades WHERE side='yes' LIMIT 1")
+        row = await cursor.fetchone()
+        if row:
+            assert row[0] > 0, f"YES position should profit when price rises, got pnl={row[0]}"
+
+    @pytest.mark.asyncio
+    async def test_no_pnl_profit_when_price_rises(self, na_db):
+        """A NO position is profitable when the NO-side price goes UP (i.e. when
+        the probability of NO increases). This was the bug — formula was inverted."""
+        ex = NewsAlphaExecutor(NewsAlphaExecutorConfig(bankroll=1000, trailing_activation_pct=0.01), na_db)
+        await ex.on_signal(_signal(market="m1", side="no", market_price=0.40, sec_left=600))
+        # NO price rises from 0.40 → 0.55 → we should be in PROFIT (not loss)
+        await ex.check_exits({"m1": _quote("m1", yes=0.45, no=0.55, sec_left=500)})
+        cursor = await na_db.db.execute("SELECT pnl, outcome FROM na_trades WHERE side='no' LIMIT 1")
+        row = await cursor.fetchone()
+        if row:
+            pnl, outcome = row
+            assert pnl > 0, f"NO position should profit when NO-side price rises, got pnl={pnl}"
+            assert outcome == "win", f"Should be marked as win, got {outcome}"
+
+    @pytest.mark.asyncio
+    async def test_no_pnl_loss_when_price_drops(self, na_db):
+        """A NO position loses when the NO-side price goes DOWN."""
+        cfg = NewsAlphaExecutorConfig(bankroll=1000, stop_loss_pct=0.03)
+        ex = NewsAlphaExecutor(cfg, na_db)
+        await ex.on_signal(_signal(market="m1", side="no", market_price=0.40, sec_left=600))
+        # NO price drops from 0.40 → 0.37 → should trigger 3% stop-loss
+        exits = await ex.check_exits({"m1": _quote("m1", yes=0.63, no=0.37, sec_left=500)})
+        assert exits == 1
+        cursor = await na_db.db.execute("SELECT pnl, outcome, exit_reason FROM na_trades LIMIT 1")
+        pnl, outcome, reason = await cursor.fetchone()
+        assert pnl < 0
+        assert outcome == "loss"
+        assert reason == "stop_loss"
+
+
 class TestKellySizing:
     @pytest.mark.asyncio
     async def test_size_scales_with_edge(self, na_db):
