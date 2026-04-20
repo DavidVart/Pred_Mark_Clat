@@ -76,8 +76,17 @@ async def run_newsalpha(
     flash_signal_cfg = SignalConfig(min_edge=max(0.01, min_edge * 0.5))
     gate = SignalGate(cooldown_seconds=300.0, edge_jump_threshold=0.05)
     flash = FlashMoveDetector()
+    # Paper executor = zero-friction baseline (what the current bot has been doing).
+    # Gray executor = same signals with realistic slippage + fees — "what live would look like".
+    # Both write to the same DB, tagged by execution_mode for comparison.
+    from src.newsalpha.slippage import SlippageConfig, SlippageSimulator
     executor_cfg = NewsAlphaExecutorConfig(bankroll=bankroll, paper_mode=True)
-    executor = NewsAlphaExecutor(executor_cfg, db)
+    executor_paper = NewsAlphaExecutor(executor_cfg, db, mode="paper")
+    slippage_sim = SlippageSimulator(SlippageConfig())  # conservative defaults
+    executor_gray = NewsAlphaExecutor(
+        NewsAlphaExecutorConfig(bankroll=bankroll, paper_mode=True),
+        db, mode="gray", slippage=slippage_sim,
+    )
 
     # News feed + classifier (Haiku for speed)
     news_feed = NewsFeed()
@@ -215,19 +224,29 @@ async def run_newsalpha(
                     sec_left=round(sig_obj.seconds_remaining, 0),
                     flash=in_flash,
                 )
-                # Execute if not in observe-only mode
+                # Execute in BOTH paper and gray modes on the same signal.
+                # Paper = ideal fills (historical baseline).
+                # Gray  = realistic fills (what we'd actually get with real money).
+                # Divergence between the two is our "trust the paper PnL" signal.
                 if not observe_only:
-                    await executor.on_signal(sig_obj)
+                    await executor_paper.on_signal(sig_obj, quote=q)
+                    await executor_gray.on_signal(sig_obj, quote=q)
 
-            # Check exits on existing positions (time-stop, stop-loss, trailing lock)
-            if not observe_only and executor.open_position_count > 0:
+            # Check exits on both executors
+            exits = 0
+            if not observe_only:
                 quotes_dict = {q.market_id: q for q in quotes}
-                exits = await executor.check_exits(quotes_dict)
-            else:
-                exits = 0
+                if executor_paper.open_position_count > 0:
+                    exits += await executor_paper.check_exits(quotes_dict)
+                if executor_gray.open_position_count > 0:
+                    exits += await executor_gray.check_exits(quotes_dict)
 
             elapsed_ms = (datetime.utcnow() - cycle_start).total_seconds() * 1000
-            summary = executor.get_summary() if not observe_only else {}
+            if observe_only:
+                paper_s = gray_s = {}
+            else:
+                paper_s = executor_paper.get_summary()
+                gray_s = executor_gray.get_summary()
             logger.info(
                 "cycle",
                 cycle=cycle,
@@ -237,8 +256,10 @@ async def run_newsalpha(
                 suppressed_by_gate=suppressed,
                 flash_active=in_flash,
                 news_boost=news_boost_active,
-                open_positions=summary.get("open_positions", 0),
-                total_pnl=f"${summary.get('total_pnl', 0):+.2f}" if summary else "$0.00",
+                paper_open=paper_s.get("open_positions", 0),
+                paper_pnl=f"${paper_s.get('total_pnl', 0):+.2f}" if paper_s else "$0.00",
+                gray_open=gray_s.get("open_positions", 0),
+                gray_pnl=f"${gray_s.get('total_pnl', 0):+.2f}" if gray_s else "$0.00",
                 exits=exits,
                 cycle_ms=int(elapsed_ms),
             )

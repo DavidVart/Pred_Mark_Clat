@@ -42,6 +42,9 @@ COPYFILE_DISABLE=1 tar \
     --exclude='*.swp' \
     --exclude='.idea' \
     --exclude='.vscode' \
+    --exclude='data/*.json' \
+    --exclude='data/arb_survey.json' \
+    --exclude='data/kalshi_series.json' \
     -czf /tmp/pmc.tar.gz .
 echo "    → $(du -h /tmp/pmc.tar.gz | awk '{print $1}') tarball ready"
 

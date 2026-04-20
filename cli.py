@@ -285,64 +285,86 @@ def news_scan(
 
 @app.command(name="news-status")
 def news_status(db: str = typer.Option("newsalpha.db", help="Path to NewsAlpha DB")):
-    """Show NewsAlpha signals, open positions, and trade history."""
+    """Show NewsAlpha status — PAPER vs GRAY side-by-side to measure real-world edge."""
     async def show():
         from src.newsalpha.db import NewsAlphaDB
         manager = NewsAlphaDB(db)
         await manager.initialize()
         try:
-            signals = await manager.recent_signals(10)
+            signals = await manager.recent_signals(8)
             today = await manager.count_signals_today()
 
-            # Trades
+            # Per-mode aggregated stats
             cursor = await manager.db.execute(
-                "SELECT * FROM na_trades ORDER BY closed_at DESC LIMIT 20"
+                """SELECT COALESCE(execution_mode, 'paper') as mode,
+                          COUNT(*) as cnt,
+                          SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins,
+                          SUM(pnl) as total_pnl,
+                          SUM(fees_paid) as total_fees,
+                          AVG(slippage_bps) as avg_slip_bps
+                   FROM na_trades
+                   GROUP BY COALESCE(execution_mode, 'paper')
+                   ORDER BY mode"""
             )
-            trades = [dict(r) for r in await cursor.fetchall()]
+            mode_stats = [dict(r) for r in await cursor.fetchall()]
 
-            # Open positions
-            cursor2 = await manager.db.execute("SELECT * FROM na_positions")
-            positions = [dict(r) for r in await cursor2.fetchall()]
+            # Open positions by mode
+            cursor2 = await manager.db.execute(
+                "SELECT COALESCE(execution_mode, 'paper') as mode, COUNT(*) as cnt, SUM(cost_basis) as exposure FROM na_positions GROUP BY COALESCE(execution_mode, 'paper')"
+            )
+            open_stats = {r[0]: (r[1], r[2] or 0) for r in await cursor2.fetchall()}
 
-            # Stats
+            # Recent closed trades (top-level, regardless of mode)
             cursor3 = await manager.db.execute(
-                "SELECT COUNT(*) as cnt, SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) as wins, "
-                "SUM(pnl) as total_pnl FROM na_trades"
+                "SELECT * FROM na_trades ORDER BY closed_at DESC LIMIT 12"
             )
-            stats = dict(await cursor3.fetchone())
+            trades = [dict(r) for r in await cursor3.fetchall()]
 
             typer.echo("=== NewsAlpha Status ===\n")
-            typer.echo(f"Signals today: {today}")
+            typer.echo(f"Signals today: {today}\n")
 
-            # Trade summary
-            cnt = stats.get("cnt") or 0
-            wins = stats.get("wins") or 0
-            total_pnl = stats.get("total_pnl") or 0.0
-            win_rate = (wins / cnt * 100) if cnt > 0 else 0.0
-            pnl_color = typer.colors.GREEN if total_pnl >= 0 else typer.colors.RED
-            typer.echo(f"Total trades: {cnt} | Wins: {wins} | Win rate: {win_rate:.1f}%")
-            typer.echo(typer.style(f"Total PnL: ${total_pnl:+.2f}", fg=pnl_color))
+            # Paper vs Gray comparison table
+            typer.echo(f"{'MODE':<8} | {'TRADES':>7} | {'WIN %':>7} | {'PnL':>11} | {'FEES':>9} | {'SLIP bps':>9} | {'OPEN':>5} | {'EXPOSURE':>10}")
+            typer.echo("-" * 90)
+            for s in mode_stats:
+                mode = s["mode"]
+                cnt = s["cnt"] or 0
+                wins = s["wins"] or 0
+                pnl = s["total_pnl"] or 0.0
+                fees = s["total_fees"] or 0.0
+                slip = s["avg_slip_bps"] or 0.0
+                win_rate = (wins / cnt * 100) if cnt > 0 else 0.0
+                open_cnt, open_exp = open_stats.get(mode, (0, 0))
+                pnl_s = typer.style(f"${pnl:+.2f}", fg=typer.colors.GREEN if pnl >= 0 else typer.colors.RED)
+                typer.echo(
+                    f"{mode:<8} | {cnt:>7} | {win_rate:>6.1f}% | {pnl_s} | ${fees:>7.2f} | {slip:>+8.1f} | {open_cnt:>5} | ${open_exp:>8.2f}"
+                )
 
-            # Open positions
-            if positions:
-                typer.echo(f"\nOpen positions ({len(positions)}):")
-                for p in positions:
-                    typer.echo(
-                        f"  {p['position_id']}: {p['title'][:40]} | "
-                        f"{p['side'].upper()} @ {p['entry_price']:.3f} | "
-                        f"cost=${p['cost_basis']:.2f} | edge={p.get('signal_edge', 0):.3f}"
-                    )
+            # Divergence callout — is paper lying to us?
+            paper_row = next((s for s in mode_stats if s["mode"] == "paper"), None)
+            gray_row = next((s for s in mode_stats if s["mode"] == "gray"), None)
+            if paper_row and gray_row and paper_row["cnt"] > 10 and gray_row["cnt"] > 10:
+                p_pnl = paper_row["total_pnl"] or 0.0
+                g_pnl = gray_row["total_pnl"] or 0.0
+                delta = p_pnl - g_pnl
+                typer.echo(f"\n>> Paper-vs-gray divergence: ${delta:+.2f} "
+                           f"(paper overstates by ${delta:.2f} — this is the slippage cost)")
+                if g_pnl > 0 and p_pnl > 0:
+                    typer.echo(f">> Gray is {g_pnl/p_pnl*100:.0f}% of paper PnL — that's the real edge survival rate")
+                elif g_pnl <= 0 < p_pnl:
+                    typer.echo(">> WARNING: gray PnL is non-positive while paper is positive. Edge is likely illusory.")
 
             # Recent trades
             if trades:
                 typer.echo(f"\nRecent trades (last {len(trades)}):")
                 for t in trades:
+                    mode = t.get("execution_mode") or "paper"
                     outcome_icon = "W" if t["outcome"] == "win" else "L"
                     pnl_c = typer.colors.GREEN if t["pnl"] > 0 else typer.colors.RED
                     typer.echo(
-                        f"  [{outcome_icon}] {t['title'][:35]} | {t['side'].upper()} | "
-                        f"PnL: " + typer.style(f"${t['pnl']:+.2f} ({t['pnl_pct']:+.1%})", fg=pnl_c) +
-                        f" | {t['hold_seconds']:.0f}s | {t['exit_reason']}"
+                        f"  [{outcome_icon}] [{mode:<5}] {t['title'][:32]} | {t['side'].upper()} | "
+                        + typer.style(f"${t['pnl']:+.2f} ({t['pnl_pct']:+.1%})", fg=pnl_c)
+                        + f" | {t['hold_seconds']:.0f}s | {t['exit_reason']}"
                     )
 
             # Recent signals

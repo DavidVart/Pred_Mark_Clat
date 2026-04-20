@@ -44,6 +44,10 @@ SCHEMA: dict[str, str] = {
             window_end TEXT NOT NULL,
             signal_edge REAL,
             is_paper INTEGER DEFAULT 1,
+            execution_mode TEXT DEFAULT 'paper',  -- 'paper' | 'gray' | 'live'
+            signal_price REAL,                    -- what the signal said (for slippage analysis)
+            entry_fees REAL DEFAULT 0,
+            entry_latency_ms INTEGER DEFAULT 0,
             opened_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """,
@@ -63,6 +67,10 @@ SCHEMA: dict[str, str] = {
             exit_reason TEXT NOT NULL,
             signal_edge REAL,
             is_paper INTEGER DEFAULT 1,
+            execution_mode TEXT DEFAULT 'paper',
+            signal_price REAL,
+            fees_paid REAL DEFAULT 0,
+            slippage_bps REAL DEFAULT 0,
             opened_at TEXT,
             closed_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -94,7 +102,22 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_na_signals_time ON na_signals(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_na_signals_market ON na_signals(market_id)",
     "CREATE INDEX IF NOT EXISTS idx_na_trades_closed ON na_trades(closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_na_trades_mode ON na_trades(execution_mode, closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_na_positions_mode ON na_positions(execution_mode)",
     "CREATE INDEX IF NOT EXISTS idx_na_ticks_time ON na_ticks(timestamp)",
+]
+
+# Migrations for DBs that predate the execution_mode/slippage columns.
+# Each is idempotent — ignore "duplicate column name" errors from SQLite.
+MIGRATIONS = [
+    "ALTER TABLE na_positions ADD COLUMN execution_mode TEXT DEFAULT 'paper'",
+    "ALTER TABLE na_positions ADD COLUMN signal_price REAL",
+    "ALTER TABLE na_positions ADD COLUMN entry_fees REAL DEFAULT 0",
+    "ALTER TABLE na_positions ADD COLUMN entry_latency_ms INTEGER DEFAULT 0",
+    "ALTER TABLE na_trades ADD COLUMN execution_mode TEXT DEFAULT 'paper'",
+    "ALTER TABLE na_trades ADD COLUMN signal_price REAL",
+    "ALTER TABLE na_trades ADD COLUMN fees_paid REAL DEFAULT 0",
+    "ALTER TABLE na_trades ADD COLUMN slippage_bps REAL DEFAULT 0",
 ]
 
 
@@ -110,8 +133,19 @@ class NewsAlphaDB:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
+        # Create new tables
         for sql in SCHEMA.values():
             await self._db.execute(sql)
+        # Apply idempotent migrations — silently skip "duplicate column" errors
+        # (happens when the column already exists on a fresh-schema DB)
+        for sql in MIGRATIONS:
+            try:
+                await self._db.execute(sql)
+            except Exception as e:
+                if "duplicate column name" not in str(e).lower():
+                    # Something else is wrong — surface it
+                    raise
+        # Indexes last (they reference columns that migrations may have added)
         for sql in INDEXES:
             await self._db.execute(sql)
         await self._db.commit()
