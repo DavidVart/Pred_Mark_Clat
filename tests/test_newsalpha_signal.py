@@ -25,6 +25,59 @@ def _quote(yes=0.50, no=None, ref=100_000, seconds_left=180.0, window_total=300.
     )
 
 
+class TestPriceRangeFilter:
+    """REGRESSION: do not emit signals on deep-OTM/ITM markets where tick-size
+    pathology makes trades untradable."""
+
+    def test_rejects_yes_price_below_5c(self):
+        q = _quote(yes=0.02, ref=100_000, seconds_left=120)
+        # Market is ultra-low, no trade regardless of fair value
+        s = detect_divergence(q, spot=95_000, config=SignalConfig(min_edge=0.01))
+        assert s is None
+
+    def test_rejects_yes_price_above_95c(self):
+        q = _quote(yes=0.98, ref=100_000, seconds_left=120)
+        s = detect_divergence(q, spot=102_000, config=SignalConfig(min_edge=0.01))
+        assert s is None
+
+    def test_accepts_yes_price_in_band(self):
+        q = _quote(yes=0.40, ref=100_000, seconds_left=60)
+        # Spot well above strike → high fair YES, buy YES
+        s = detect_divergence(q, spot=100_500, config=SignalConfig(min_edge=0.03))
+        # Signal may or may not fire based on math; key is it wasn't price-filtered
+        # We verify the opposite side check too: if fair_yes is very high and yes
+        # market is 0.40, edge = high, should fire.
+        assert s is not None
+
+
+class TestStrikeDirection:
+    """REGRESSION: 'below $X' markets must INVERT the fair-value formula."""
+
+    def test_below_market_inverts_fair_yes(self):
+        """A 'below $68k' market: YES wins if BTC < $68k. Fair YES = 1 - P(above)."""
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        # Strike $68k, current BTC $75k → P(above) ≈ 1, so for "below" market fair YES ≈ 0
+        q = MarketQuote(
+            market_id="below-68k",
+            title="Will BTC be below $68,000 on April 21?",
+            yes_price=0.40,  # market says 40% (wrong! correct is near 0)
+            no_price=0.60,
+            window_start=now - timedelta(seconds=60),
+            window_end=now + timedelta(seconds=120),
+            starting_ref_price=68_000,
+            market_type="fixed_strike",
+            strike_direction="below",
+        )
+        s = detect_divergence(q, spot=75_000, config=SignalConfig(min_edge=0.03))
+        assert s is not None
+        # We buy NO (market overpriced YES). Fair NO should be near 1.0
+        # because BTC is way above strike for a "below" market → NO wins.
+        assert s.side == "no"
+        assert s.fair_value > 0.90  # fair of NO side
+        assert s.market_price == 0.60  # NO market price
+
+
 class TestDetectDivergence:
     def test_no_signal_when_aligned(self):
         """Spot at strike, market at 0.50 → no divergence."""

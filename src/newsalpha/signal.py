@@ -43,6 +43,10 @@ class SignalConfig:
     # If market doesn't publish a reference (opening) price, use current spot
     # at first observation (less accurate; flag in logs)
     use_current_as_reference_fallback: bool = True
+    # Hard price filter — deep-OTM/ITM markets (1¢ or 99¢) have tick-size
+    # pathologies where a single tick is 100%+ of the price. Don't trade them.
+    min_market_price: float = 0.05
+    max_market_price: float = 0.95
 
 
 def detect_divergence(
@@ -61,24 +65,35 @@ def detect_divergence(
     if sec_left < cfg.min_seconds_remaining or sec_left > cfg.max_seconds_remaining:
         return None
 
+    # Hard price filter — deep-OTM/ITM markets have tick-size pathology.
+    # A 1¢ market where a single tick move is 100% return is not tradeable.
+    if quote.yes_price < cfg.min_market_price or quote.yes_price > cfg.max_market_price:
+        return None
+
     # Establish the reference (strike) price
     ref = quote.starting_ref_price
     if ref is None:
         if not cfg.use_current_as_reference_fallback:
             return None
-        # Fallback: use current spot as ref. Effectively says "will spot end
-        # up higher than now" — still a tradeable question, just different.
         ref = spot
         logger.debug("ref_price_fallback", market=quote.market_id)
 
     window_total = (quote.window_end - quote.window_start).total_seconds() or 300.0
-    fair_yes = fair_yes_probability(
+
+    # Compute fair YES probability.
+    # For "above $X" markets: YES = P(spot_at_close > strike). Our formula.
+    # For "below $X" markets: YES = P(spot_at_close < strike) = 1 - P(spot > strike).
+    fair_yes_above = fair_yes_probability(
         spot=spot,
         strike=ref,
         seconds_remaining=sec_left,
         window_total_seconds=window_total,
         params=fv_params,
     )
+    if getattr(quote, "strike_direction", "above") == "below":
+        fair_yes = 1.0 - fair_yes_above
+    else:
+        fair_yes = fair_yes_above
 
     gap = fair_yes - quote.yes_price
 
@@ -86,7 +101,7 @@ def detect_divergence(
         return None
 
     if gap > 0:
-        # Market underpricing YES: buy YES at current price, fair says higher
+        # Market underpricing YES: buy YES
         side = "yes"
         market_price = quote.yes_price
         fair_value = fair_yes
@@ -95,6 +110,11 @@ def detect_divergence(
         side = "no"
         market_price = quote.no_price
         fair_value = 1.0 - fair_yes
+
+    # Final sanity check — the side we're BUYING also has to be within the
+    # tradeable price band (not just yes_price).
+    if market_price < cfg.min_market_price or market_price > cfg.max_market_price:
+        return None
 
     return DivergenceSignal(
         market_id=quote.market_id,

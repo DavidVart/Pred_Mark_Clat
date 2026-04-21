@@ -40,9 +40,12 @@ class NewsAlphaExecutorConfig:
         bankroll: float = 1000.0,
         kelly_fraction: float = 0.15,
         max_position_pct: float = 0.05,
-        stop_loss_pct: float = 0.03,
-        trailing_profit_lock_pct: float = 0.40,
-        trailing_activation_pct: float = 0.02,
+        # Stop-loss and trailing-activation must be WIDER than round-trip friction
+        # (~5-8% on Polymarket) or every gray/live trade insta-stops on the
+        # entry spread. These defaults are calibrated for post-friction trading.
+        stop_loss_pct: float = 0.08,
+        trailing_profit_lock_pct: float = 0.50,
+        trailing_activation_pct: float = 0.04,
         flatten_before_resolution_seconds: float = 60.0,
         max_positions: int = 3,
         paper_mode: bool = True,
@@ -50,6 +53,9 @@ class NewsAlphaExecutorConfig:
         live_max_position_usd: float = 5.0,
         live_max_daily_loss_usd: float = 20.0,
         live_max_daily_opens: int = 30,
+        # Sanity cap: refuse to open a position with size (shares) exceeding
+        # this. Catches "buy 5000 shares at 1¢" pathology on deep-OTM markets.
+        max_shares_per_position: float = 1000.0,
     ):
         self.bankroll = bankroll
         self.kelly_fraction = kelly_fraction
@@ -63,6 +69,7 @@ class NewsAlphaExecutorConfig:
         self.live_max_position_usd = live_max_position_usd
         self.live_max_daily_loss_usd = live_max_daily_loss_usd
         self.live_max_daily_opens = live_max_daily_opens
+        self.max_shares_per_position = max_shares_per_position
 
 
 class OpenPosition:
@@ -237,6 +244,21 @@ class NewsAlphaExecutor:
             size = dollar_size / entry_price if entry_price > 0 else 0
             if size <= 0:
                 return False
+
+        # Sanity: refuse enormous share counts. If size > max_shares, the
+        # entry_price must be very low (< 5c) and we're on a thin/tick-pathology
+        # market. The divergence detector's price filter should have caught this
+        # but belt-and-suspenders.
+        if size > self.config.max_shares_per_position:
+            logger.warning(
+                "refused_oversized_position",
+                mode=self.mode,
+                market=signal.title[:40],
+                size=round(size, 0),
+                entry_price=entry_price,
+                cap=self.config.max_shares_per_position,
+            )
+            return False
 
         pos = OpenPosition(
             position_id=f"na-{self.mode}-{uuid.uuid4().hex[:10]}",

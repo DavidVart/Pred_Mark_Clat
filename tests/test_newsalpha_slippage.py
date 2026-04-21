@@ -78,18 +78,17 @@ class TestSlippageSimulator:
         """Taker buy should pay MORE than signal price (spread cost)."""
         cfg = SlippageConfig(
             random_seed=1,
-            btc_sigma_5min=0.0,   # no price drift
-            spread_cents_mean=2.0,
-            spread_cents_std=0.0,  # fixed spread
+            btc_sigma_5min=0.0,             # no price drift
+            spread_pct_of_mid_mean=0.05,    # 5% of 0.40 mid = 2c spread
+            spread_pct_of_mid_std=0.0,      # deterministic
         )
         sim = SlippageSimulator(cfg)
-        # Give plenty of edge so adverse_move doesn't reject
         sig = _signal(edge=0.30, market_price=0.40, fair_value=0.70)
         q = _quote(yes=0.40)
         r = sim.simulate_entry(sig, q, "taker")
         assert r.filled
         assert r.fill_price > 0.40  # paid ask
-        assert r.slippage_bps > 0  # positive = worse than signal
+        assert r.slippage_bps > 0
 
     def test_taker_refuses_when_move_kills_edge(self):
         """If price drifts enough during latency that fair <= fill price, refuse.
@@ -103,8 +102,8 @@ class TestSlippageSimulator:
             btc_sigma_5min=0.03,
             latency_min_sec=3.0,
             latency_max_sec=3.0,
-            spread_cents_mean=5.0,   # help force fill_price > fair
-            spread_cents_std=0.0,
+            spread_pct_of_mid_mean=0.15,    # large spread relative to mid
+            spread_pct_of_mid_std=0.0,
         )
         sim = SlippageSimulator(cfg)
         # Fair value = market_price + 0.025 = 0.425. With 2.5c spread alone
@@ -139,8 +138,8 @@ class TestSlippageSimulator:
         cfg = SlippageConfig(
             random_seed=7,
             btc_sigma_5min=0.0,
-            spread_cents_mean=3.0,
-            spread_cents_std=0.0,
+            spread_pct_of_mid_mean=0.08,
+            spread_pct_of_mid_std=0.0,
             maker_fill_prob_at_bid=1.0,  # force fill for test
         )
         sim = SlippageSimulator(cfg)
@@ -152,6 +151,43 @@ class TestSlippageSimulator:
         maker = sim.simulate_entry(sig, q, "maker")
         assert taker.filled and maker.filled
         assert maker.fill_price < taker.fill_price  # bought at bid, better than ask
+
+    def test_spread_scales_with_price_not_absolute(self):
+        """REGRESSION: on a 1¢ market, spread must not be 2¢ (200% slippage)."""
+        cfg = SlippageConfig(
+            random_seed=0,
+            btc_sigma_5min=0.0,
+            spread_pct_of_mid_mean=0.08,  # 8% of mid
+            spread_pct_of_mid_std=0.0,
+            min_tick=0.001,
+        )
+        sim = SlippageSimulator(cfg)
+        # On a 1c market, 8% of 0.01 = 0.0008, floored at min_tick=0.001
+        spread = sim._sample_spread(mid=0.01)
+        assert spread <= 0.005, f"spread on 1c mid was {spread}, too wide"
+        # On a 40c market, 8% of 0.40 = 0.032 (3.2c)
+        spread = sim._sample_spread(mid=0.40)
+        assert 0.02 <= spread <= 0.04
+
+    def test_spread_never_below_tick(self):
+        cfg = SlippageConfig(
+            random_seed=0, spread_pct_of_mid_mean=0.0, spread_pct_of_mid_std=0.0,
+            min_tick=0.001,
+        )
+        sim = SlippageSimulator(cfg)
+        # With 0% pct, spread should fall back to min_tick
+        assert sim._sample_spread(mid=0.50) == cfg.min_tick
+
+    def test_spread_never_exceeds_max_absolute(self):
+        cfg = SlippageConfig(
+            random_seed=0,
+            spread_pct_of_mid_mean=0.50,   # 50% of mid is insane
+            spread_pct_of_mid_std=0.0,
+            max_absolute_spread=0.05,
+        )
+        sim = SlippageSimulator(cfg)
+        spread = sim._sample_spread(mid=0.90)  # 50% of 0.90 = 0.45, capped at 0.05
+        assert spread == cfg.max_absolute_spread
 
     def test_apply_fee_computes_effective_cost(self):
         sim = SlippageSimulator(SlippageConfig(random_seed=0, taker_fee_pct=0.018))
@@ -182,7 +218,8 @@ class TestGrayExecutor:
     async def test_gray_opens_at_slipped_price(self, na_db):
         """Gray mode should open at a price WORSE than the signal."""
         sim = SlippageSimulator(SlippageConfig(
-            random_seed=1, btc_sigma_5min=0.0, spread_cents_mean=2.0, spread_cents_std=0.0,
+            random_seed=1, btc_sigma_5min=0.0,
+            spread_pct_of_mid_mean=0.05, spread_pct_of_mid_std=0.0,
         ))
         ex = NewsAlphaExecutor(
             NewsAlphaExecutorConfig(bankroll=1000),
@@ -244,7 +281,7 @@ class TestGrayExecutor:
         """Gray trade PnL on close should be WORSE than paper PnL due to exit slippage + fees."""
         sim = SlippageSimulator(SlippageConfig(
             random_seed=3, btc_sigma_5min=0.0,
-            spread_cents_mean=2.0, spread_cents_std=0.0,
+            spread_pct_of_mid_mean=0.05, spread_pct_of_mid_std=0.0,
             taker_fee_pct=0.01,
         ))
         gray = NewsAlphaExecutor(

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from src.newsalpha.coinbase_rest import historical_price
+from src.newsalpha.market_classifier import classify_title
 from src.newsalpha.models import MarketQuote
 from src.utils.logging import get_logger
 
@@ -33,7 +34,7 @@ logger = get_logger("newsalpha.polymarket")
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 CLOB_MIDPOINT_URL = "https://clob.polymarket.com/midpoint"
 
-# Title patterns for Polymarket's short-duration crypto products.
+# Broad filter at discovery — we still need the classifier to verify supported type.
 TITLE_PATTERNS = [
     re.compile(r"bitcoin.*up or down", re.IGNORECASE),
     re.compile(r"btc.*up or down", re.IGNORECASE),
@@ -154,6 +155,20 @@ class PolymarketCryptoFeed:
         title = m.get("question") or m.get("title") or ""
         market_id = m.get("conditionId") or m.get("id") or title[:60]
 
+        # CRITICAL: classify the market BEFORE we compute strike. Using the wrong
+        # strike produces fake "edges" of 40-50% that will blow out the bankroll
+        # in gray/live mode. If we can't classify the title into a supported
+        # market type, skip the market entirely.
+        classification = classify_title(title)
+        if not classification.is_supported:
+            logger.debug(
+                "market_type_unsupported",
+                market_id=market_id[:20],
+                type=classification.type,
+                title=title[:60],
+            )
+            return None
+
         # Parse dates — preserve TZ-aware versions for historical price lookup,
         # but strip timezone for MarketQuote (which uses naive UTC internally).
         # CRITICAL: prefer `eventStartTime` (actual trading window open) over
@@ -205,39 +220,51 @@ class PolymarketCryptoFeed:
         yes_price = max(0.01, min(0.99, yes_mid))
         no_price = max(0.01, min(0.99, no_mid))
 
-        # Strike / reference price.
-        # Polymarket doesn't expose the opening price in the API response, so
-        # we compute it ourselves:
-        #   1. If we've cached a ref for this market already, use it (stable).
-        #   2. Otherwise, fetch the historical BTC spot at window_start from
-        #      Coinbase candles REST API. This is the TRUE strike.
-        #   3. If historical fetch fails (network, API down), fall back to
-        #      current spot — less accurate but keeps the pipeline moving.
-        ref = self.get_ref_price(market_id)
-        if ref is None:
-            historical = await historical_price(
-                "BTC-USD",
-                at=window_start_aware,
-                http=self._http,
-            )
-            if historical is not None:
-                self.record_ref_price(market_id, historical)
-                ref = historical
+        # Strike resolution dispatches on market type:
+        #   UP_OR_DOWN    → strike = historical BTC spot at window_start (old logic)
+        #   FIXED_STRIKE  → strike = parsed dollar amount from title ($72,000 etc)
+        ref: float | None = None
+
+        if classification.type == "fixed_strike" and classification.strike is not None:
+            # Strike IS the dollar amount in the title. No historical lookup needed.
+            ref = classification.strike
+            if market_id not in self._ref_price_cache:
+                self._ref_price_cache[market_id] = (ref, datetime.utcnow())
                 logger.info(
-                    "ref_price_from_history",
+                    "ref_price_from_title",
                     market=market_id[:30],
-                    window_start=window_start.isoformat()[:19],
-                    price=round(historical, 2),
+                    strike=ref,
+                    direction=classification.direction,
+                    title=title[:60],
                 )
-            elif current_spot is not None:
-                # Fallback: only useful for markets that JUST opened (window_start ≈ now)
-                self.record_ref_price(market_id, current_spot)
-                ref = current_spot
-                logger.warning(
-                    "ref_price_fallback_current_spot",
-                    market=market_id[:30],
-                    spot=round(current_spot, 2),
+        else:
+            # Up-or-Down market. Use historical BTC at window_start.
+            ref = self.get_ref_price(market_id)
+            if ref is None:
+                historical = await historical_price(
+                    "BTC-USD", at=window_start_aware, http=self._http,
                 )
+                if historical is not None:
+                    self.record_ref_price(market_id, historical)
+                    ref = historical
+                    logger.info(
+                        "ref_price_from_history",
+                        market=market_id[:30],
+                        window_start=window_start.isoformat()[:19],
+                        price=round(historical, 2),
+                    )
+                elif current_spot is not None:
+                    # Fallback: only useful for markets that JUST opened.
+                    self.record_ref_price(market_id, current_spot)
+                    ref = current_spot
+                    logger.warning(
+                        "ref_price_fallback_current_spot",
+                        market=market_id[:30],
+                        spot=round(current_spot, 2),
+                    )
+
+        if ref is None:
+            return None
 
         return MarketQuote(
             market_id=market_id,
@@ -247,6 +274,8 @@ class PolymarketCryptoFeed:
             window_start=window_start,
             window_end=window_end,
             starting_ref_price=ref,
+            market_type=classification.type,
+            strike_direction=classification.direction,
         )
 
     async def _clob_midpoint(self, token_id: str) -> float | None:

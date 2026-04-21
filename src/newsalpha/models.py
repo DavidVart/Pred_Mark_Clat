@@ -30,6 +30,16 @@ class MarketQuote(BaseModel):
 
     For Polymarket 5-minute BTC markets like "Will BTC close higher at 15:05?".
     yes_price is the implied probability of YES (0-1).
+
+    starting_ref_price is the STRIKE used by the fair-value model:
+        - Up/Down markets:   BTC spot price at window open (historical lookup)
+        - Fixed-strike:      parsed strike from title (e.g., $72,000)
+    If the market title can't be classified into a supported type, the
+    scanner must skip the market rather than feed a wrong strike here.
+
+    market_type captures which type this is, so the detector can apply
+    the right math. "above" vs "below" matters for fixed-strike markets —
+    a "below" market means YES = BTC < strike, inverting the formula.
     """
 
     market_id: str
@@ -38,7 +48,9 @@ class MarketQuote(BaseModel):
     no_price: float = Field(ge=0.0, le=1.0)
     window_start: datetime  # opening of the 5M window
     window_end: datetime    # resolution time of the window
-    starting_ref_price: float | None = None  # BTC price at window_start (if known)
+    starting_ref_price: float | None = None  # strike used by fair-value model
+    market_type: str = "up_or_down"  # "up_or_down" | "fixed_strike"
+    strike_direction: str = "above"  # "above" (YES if spot > strike) | "below"
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     @property

@@ -57,11 +57,19 @@ class SlippageConfig:
     # σ_5min ≈ 0.3% is conservative (calm market); use 0.5% to stress test.
     btc_sigma_5min: float = 0.003
 
-    # --- Spread crossing ---
-    # Typical bid-ask spread on thin 5M BTC Polymarket markets in cents.
-    # When we submit a taker BUY, we pay ask = mid + half_spread.
-    spread_cents_mean: float = 2.0
-    spread_cents_std: float = 1.5
+    # --- Spread crossing (price-scaled) ---
+    # Real Polymarket spreads SCALE with price:
+    #   - At mid ≈ 0.50, spreads are typically 1-3 cents (~2-6% of mid)
+    #   - At mid ≈ 0.10, spreads are typically 0.5-1 cent (~5-10% of mid)
+    #   - At mid ≈ 0.02, typical spread is 0.1-0.3 cents (tick-limited)
+    # An ABSOLUTE 2-cent spread model would make OTM trades impossible
+    # (100%+ slippage). We model spread as:
+    #     spread = clamp(mid * pct, min_tick, max_absolute)
+    # where pct has a random component for realism.
+    spread_pct_of_mid_mean: float = 0.05    # 5% of mid
+    spread_pct_of_mid_std: float = 0.02     # ±2% std dev
+    min_tick: float = 0.001                 # Polymarket tick size (0.1 cent)
+    max_absolute_spread: float = 0.05       # never more than 5c absolute
 
     # --- Fill probability ---
     # Taker order at ask → always fills (we're paying the spread)
@@ -152,18 +160,20 @@ class SlippageSimulator:
         # Clamp to [0.01, 0.99]
         new_mid = max(0.01, min(0.99, new_mid))
 
-        # 3. Spread at arrival time
-        spread_cents = max(1.0, self._rng.gauss(cfg.spread_cents_mean, cfg.spread_cents_std))
-        half_spread = spread_cents / 200.0  # cents → dollars, then half
+        # 3. Spread at arrival time — SCALES with price (real Polymarket behavior)
+        spread = self._sample_spread(new_mid)
+        half_spread = spread / 2.0
 
         if signal.side == "yes":
             ask = new_mid + half_spread
             bid = new_mid - half_spread
-        else:  # no side
-            # On Polymarket, no_price + yes_price = 1. But the spread is symmetric
-            # around the NO mid. Mirror.
+        else:  # no side — spread symmetric around NO mid
             ask = new_mid + half_spread
             bid = new_mid - half_spread
+
+        # Clamp bid/ask to valid probability range
+        ask = max(cfg.min_tick, min(1.0 - cfg.min_tick, ask))
+        bid = max(cfg.min_tick, min(1.0 - cfg.min_tick, bid))
 
         # 4. Fill simulation
         result = ExecutionResult(
@@ -236,6 +246,18 @@ class SlippageSimulator:
         result.fill_size = size
         result.effective_cost = notional + result.fees_paid
 
+    def _sample_spread(self, mid: float) -> float:
+        """Sample a realistic bid-ask spread at the given mid-price.
+
+        Spread = max(min_tick, clamp(mid * pct, min_tick, max_absolute))
+        where pct is drawn from Normal(mean, std) and floored at 0.
+        """
+        cfg = self.config
+        pct = max(0.0, self._rng.gauss(cfg.spread_pct_of_mid_mean, cfg.spread_pct_of_mid_std))
+        raw = mid * pct
+        spread = max(cfg.min_tick, min(cfg.max_absolute_spread, raw))
+        return spread
+
     def simulate_exit(
         self,
         exit_market_price: float,
@@ -244,17 +266,12 @@ class SlippageSimulator:
     ) -> tuple[float, float]:
         """Simulate exit fill: returns (fill_price, fee_pct).
 
-        Simpler than entry — we don't re-simulate latency here because exits
-        are triggered by price moves we've already observed. We just cross the
-        spread and pay fees.
+        Uses the same price-scaled spread model as entry. When CLOSING we
+        receive the bid (half-spread below mid).
         """
         cfg = self.config
-        spread_cents = max(1.0, self._rng.gauss(cfg.spread_cents_mean, cfg.spread_cents_std))
-        half_spread = spread_cents / 200.0
-
-        # When CLOSING, we hit the bid (for YES) or the ask (for NO being sold back)
-        # Simpler model: pay half-spread regardless of side
-        fill_price = exit_market_price - half_spread  # we get LESS than mid when selling
-
+        spread = self._sample_spread(exit_market_price)
+        half_spread = spread / 2.0
+        fill_price = max(cfg.min_tick, exit_market_price - half_spread)
         fee_pct = cfg.taker_fee_pct if order_type == "taker" else cfg.maker_fee_pct
         return fill_price, fee_pct

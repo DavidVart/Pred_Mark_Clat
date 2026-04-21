@@ -202,6 +202,33 @@ class TestPnLFormula:
         assert reason == "stop_loss"
 
 
+class TestMaxSharesCap:
+    """REGRESSION: enormous share counts (e.g. 5000 @ 1c) must be refused."""
+
+    @pytest.mark.asyncio
+    async def test_refuses_oversized_position(self, na_db):
+        # At 1c, a $50 position = 5000 shares. Cap it at 1000.
+        cfg = NewsAlphaExecutorConfig(
+            bankroll=1000,
+            max_position_pct=0.20,  # allow Kelly to want $200
+            max_shares_per_position=1000,
+        )
+        ex = NewsAlphaExecutor(cfg, na_db, mode="paper")
+        # market_price=0.02 → 200 / 0.02 = 10,000 shares, WAY over cap
+        opened = await ex.on_signal(_signal(edge=0.30, market_price=0.02, sec_left=600))
+        assert not opened
+        cursor = await na_db.db.execute("SELECT COUNT(*) FROM na_positions")
+        assert (await cursor.fetchone())[0] == 0
+
+    @pytest.mark.asyncio
+    async def test_allows_normal_size(self, na_db):
+        cfg = NewsAlphaExecutorConfig(bankroll=1000, max_shares_per_position=1000)
+        ex = NewsAlphaExecutor(cfg, na_db, mode="paper")
+        # market_price=0.40 → reasonable size
+        opened = await ex.on_signal(_signal(edge=0.15, market_price=0.40, sec_left=600))
+        assert opened
+
+
 class TestKellySizing:
     @pytest.mark.asyncio
     async def test_size_scales_with_edge(self, na_db):
