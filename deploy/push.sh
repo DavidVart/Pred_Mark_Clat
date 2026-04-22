@@ -64,6 +64,7 @@ if id pmc >/dev/null 2>&1; then
     systemctl restart pmc-llm-bot 2>/dev/null || echo "    (pmc-llm-bot not installed yet)"
     systemctl restart pmc-arb-bot 2>/dev/null || echo "    (pmc-arb-bot not installed yet)"
     systemctl restart pmc-newsalpha-bot 2>/dev/null || echo "    (pmc-newsalpha-bot not installed yet)"
+    systemctl restart pmc-weather-recorder 2>/dev/null || echo "    (pmc-weather-recorder not installed yet)"
 else
     echo "    pmc user not found — first-time install — extracting as root"
     tar -xzf /tmp/pmc.tar.gz -C "${VM_PATH}"

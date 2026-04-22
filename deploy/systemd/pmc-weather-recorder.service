@@ -1,0 +1,28 @@
+[Unit]
+Description=Prediction Market Trading Bot — Weather Edge Recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmc
+Group=pmc
+WorkingDirectory=/opt/pmc
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/pmc/.env
+ExecStart=/opt/pmc/venv/bin/python /opt/pmc/cli.py weather-record --poll-min 15 --db /opt/pmc/weather_recorder.db
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StandardOutput=append:/var/log/pmc/weather-recorder.log
+StandardError=append:/var/log/pmc/weather-recorder.log
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pmc /var/log/pmc
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

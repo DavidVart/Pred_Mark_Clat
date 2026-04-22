@@ -257,6 +257,85 @@ def arb_status():
     asyncio.run(show())
 
 
+@app.command(name="weather-record")
+def weather_record(
+    db: str = typer.Option("weather_recorder.db", help="Path to weather-recorder DB"),
+    poll_min: int = typer.Option(15, help="Minutes between snapshots"),
+    log_level: str = typer.Option("INFO", help="Log level"),
+):
+    """Empirical thesis validator for Kalshi weather trading.
+
+    Continuously records Kalshi prices + our NOAA-derived predictions. After
+    48-72h of data, run `weather-analyze` to see if our model beats Kalshi's
+    market on resolved outcomes.
+    """
+    logger = get_logger("cli")
+    logger.info("weather_recorder_cli_start", poll_min=poll_min, db=db)
+    typer.echo(f"Weather recorder starting — poll every {poll_min}min, db={db}")
+    from src.weather_recorder.recorder import run_recorder
+    asyncio.run(run_recorder(
+        db_path=db,
+        poll_interval_sec=poll_min * 60,
+        log_level=log_level,
+    ))
+
+
+@app.command(name="weather-analyze")
+def weather_analyze(
+    db: str = typer.Option("weather_recorder.db", help="Path to weather-recorder DB"),
+):
+    """Compute Brier score for our model vs Kalshi market on resolved snapshots."""
+    async def show():
+        from src.weather_recorder.db import WeatherRecorderDB
+        manager = WeatherRecorderDB(db)
+        await manager.initialize()
+        try:
+            # Aggregate by market_ticker — one snapshot per market (latest)
+            cursor = await manager.db.execute(
+                """SELECT market_ticker, direction, threshold, yes_mid, our_yes_prob,
+                          noaa_high_forecast, actual_high, outcome_yes
+                   FROM wr_snapshots
+                   WHERE resolved = 1 AND outcome_yes IS NOT NULL AND yes_mid IS NOT NULL
+                   GROUP BY market_ticker"""
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+
+            typer.echo(f"=== Weather Edge Analysis ===")
+            typer.echo(f"Resolved snapshots: {len(rows)}\n")
+
+            if not rows:
+                typer.echo("No resolved data yet. Let the recorder run 24-72h.")
+                await manager.close()
+                return
+
+            # Brier score: mean((prob - outcome)^2)
+            our_brier = sum((r["our_yes_prob"] - r["outcome_yes"]) ** 2 for r in rows) / len(rows)
+            mkt_brier = sum((r["yes_mid"] - r["outcome_yes"]) ** 2 for r in rows) / len(rows)
+
+            # Accuracy (predicted side right)
+            our_correct = sum(1 for r in rows if (r["our_yes_prob"] > 0.5) == bool(r["outcome_yes"]))
+            mkt_correct = sum(1 for r in rows if (r["yes_mid"] > 0.5) == bool(r["outcome_yes"]))
+
+            typer.echo(f"{'MODEL':<10} | {'BRIER':>8} | {'ACCURACY':>10}")
+            typer.echo("-" * 40)
+            brier_our_c = typer.colors.GREEN if our_brier < mkt_brier else typer.colors.RED
+            brier_mkt_c = typer.colors.GREEN if mkt_brier < our_brier else typer.colors.RED
+            typer.echo(f"{'ours':<10} | " + typer.style(f"{our_brier:>8.4f}", fg=brier_our_c) + f" | {our_correct}/{len(rows)} ({100*our_correct/len(rows):.0f}%)")
+            typer.echo(f"{'market':<10} | " + typer.style(f"{mkt_brier:>8.4f}", fg=brier_mkt_c) + f" | {mkt_correct}/{len(rows)} ({100*mkt_correct/len(rows):.0f}%)")
+            typer.echo()
+            if our_brier < mkt_brier:
+                delta = (mkt_brier - our_brier) / mkt_brier * 100
+                typer.echo(typer.style(f">> OUR MODEL beats market by {delta:.1f}% on Brier score", fg=typer.colors.GREEN))
+                typer.echo(">> Thesis validated — build the weather bot.")
+            else:
+                delta = (our_brier - mkt_brier) / mkt_brier * 100
+                typer.echo(typer.style(f">> MARKET beats our model by {delta:.1f}% on Brier score", fg=typer.colors.RED))
+                typer.echo(">> Our simple model is not enough. Pivot or refine model.")
+        finally:
+            await manager.close()
+    asyncio.run(show())
+
+
 @app.command(name="news-scan")
 def news_scan(
     db: str = typer.Option("newsalpha.db", help="Path to NewsAlpha DB"),
